@@ -17,6 +17,8 @@ let featureSet={
   "desireInbox":false,
   "mindsetMastery":false
 }
+let taskModeLockedForWishlist=false;
+let wishlistBannerActive=false;
 
 //Get features from api
 //Replace features based on response from api and set featureSet.
@@ -85,6 +87,11 @@ function isLoggedOut() {
     // });
   });
   modeToggleSwitch.addEventListener("change",(e)=>{
+    if (taskModeLockedForWishlist && e.target.checked===true){
+      e.preventDefault();
+      setThoughtModeOn();
+      return;
+    }
     modeToggleSwitch.toggleAttribute("checked",e.target.checked);
     chrome.storage.local.remove("people");
     chrome.storage.local.remove("selectedPersonId");
@@ -256,6 +263,18 @@ function isLoggedOut() {
   function setStatus(newStatus){
     status.innerHTML=`<p>${newStatus}</p>`;
   }
+  async function getActiveTabData() {
+    return new Promise((resolve) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => resolve(tab || null));
+    });
+  }
+
+  function isAmazonWishlistUrl(url = "") {
+    return /amazon\.[^/]+\/(hz\/wishlist|wishlist)/i.test(url);
+  }
+  function isAmazonProductUrl(url = "") {
+    return /amazon\.[^/]+\/(dp|gp\/product)\//i.test(url);
+  }
   function appendStatus(addToStatus){
     status.innerHTML+=`<p>${addToStatus}</p>`;
   }
@@ -269,6 +288,7 @@ function isLoggedOut() {
         if (selectedPersonId || people === PEOPLE_NONE) {
           await parsePageData();
           parsedDataViewValidationUpdate();
+          await maybePromptToImportAmazonWishlist();
         }
 
         loadNewModeProperties();
@@ -489,12 +509,156 @@ function isLoggedOut() {
           if(result){
             const { title, price, url } = result;
             // alert(price);
+            if (wishlistBannerActive) return;
             displayParsedData(title, price, url);
             await checkIfItemExistsInInbox(); // Check if item exists before enabling the "Add to Inbox" button
           }
         }
       );
     });
+  }
+  async function maybePromptToImportAmazonWishlist() {
+    const tab = await getActiveTabData();
+    const pageUrl = tab?.url || "";
+    const isWishlistPage = isAmazonWishlistUrl(pageUrl);
+    const isProductPage = isAmazonProductUrl(pageUrl);
+    if (!tab?.id || (!isWishlistPage && !isProductPage)) {
+      taskModeLockedForWishlist=false;
+      modeToggleSwitch.removeAttribute("disabled");
+      return;
+    }
+
+    const financialModeEnabled = await ifFinancialSupportEnabled();
+    const mode = financialModeEnabled ? MODE_DESIRE_STRING : MODE_TASK_STRING;
+    if (isModeDesire() !== financialModeEnabled) setStoredModeIsDesire(financialModeEnabled);
+
+    renderWishlistImportBanner(financialModeEnabled, async (shouldImport) => {
+      if (!shouldImport) {
+        wishlistBannerActive=false;
+        taskModeLockedForWishlist=true;
+        setThoughtModeOn();
+        modeToggleSwitch.removeAttribute("checked");
+        modeToggleSwitch.setAttribute("disabled","disabled");
+        modeToggleSwitchRightOption.classList.add("disabled");
+        setStatus("Wishlist import skipped. Task mode is now enabled for this wishlist.");
+        displayModeSwitch(true);
+        actionButtonDisplay(true);
+        parsePageData().then(() => {
+          parsedDataViewValidationUpdate();
+          checkIfItemExistsInInbox();
+        });
+        return;
+      }
+      wishlistBannerActive=false;
+      taskModeLockedForWishlist=false;
+      modeToggleSwitch.removeAttribute("disabled");
+      await importAmazonWishlistItems(tab.id, mode, isWishlistPage);
+    });
+  }
+
+  function renderWishlistImportBanner(financialModeEnabled, onDecision){
+    wishlistBannerActive=true;
+    const inboxName=financialModeEnabled?"financial":"task";
+    setStatus(`
+      <div style="border:1px solid #d7e3ff;background:#f5f8ff;padding:10px;border-radius:8px;">
+        <div style="font-weight:bold;margin-bottom:6px;">Amazon wishlist detected</div>
+        <div style="font-size:12px;margin-bottom:10px;">Would you like to add these item(s) to your ${inboxName} inbox?</div>
+        <div style="display:flex;gap:8px;">
+          <button id="wishlistImportYes" style="flex:1;">Yes, import</button>
+          <button id="wishlistImportNo" style="flex:1;">No</button>
+        </div>
+      </div>
+    `);
+    document.getElementById("wishlistImportYes")?.addEventListener("click",()=>onDecision(true),{once:true});
+    document.getElementById("wishlistImportNo")?.addEventListener("click",()=>onDecision(false),{once:true});
+  }
+
+  async function importAmazonWishlistItems(tabId, mode, isWishlistPage) {
+    chrome.storage.local.get(["email", "selectedPersonId", "clientID"], async ({ email, selectedPersonId, clientID }) => {
+      if (!email) return;
+      addToInboxButton.style.display = "none";
+      try {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId },
+          function: isWishlistPage ? scrapeAmazonWishlistItems : scrapeAmazonProductAsWishlistItem,
+        });
+
+        const items = (result?.result || []).filter((item) => item.title);
+        if (!items.length) {
+          setStatus("No wishlist items were detected on this page.");
+          return;
+        }
+
+      renderWishlistImportProgress(items, 0, "Starting import...");
+      let addedCount = 0;
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index];
+        renderWishlistImportProgress(items, index, "Checking item...");
+
+        const existsBody = { title: item.title, mode, email, selectedPersonId, clientID };
+        const existsResponse = await fetch(ITEM_EXISTS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(existsBody),
+        });
+        if (!existsResponse.ok) {
+          renderWishlistImportProgress(items, index, "Check failed. Skipping item.");
+          continue;
+        }
+        const existsData = await existsResponse.json();
+        if (existsData.exists) {
+          renderWishlistImportProgress(items, index + 1, "Item already exists. Skipped.");
+          continue;
+        }
+
+        let addBody = { ...existsBody, url: item.url || item.imageUrl || item.title };
+        if (mode === MODE_DESIRE_STRING && item.price) addBody = { ...addBody, price: item.price };
+        renderWishlistImportProgress(items, index, "Adding item...");
+        const addResponse = await fetch(ADD_TO_INBOX_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(addBody),
+        });
+        if (addResponse.ok) {
+          addedCount += 1;
+          renderWishlistImportProgress(items, index + 1, "Item added.");
+        } else {
+          renderWishlistImportProgress(items, index, "Add failed. Skipping item.");
+        }
+      }
+
+        renderWishlistImportProgress(items, items.length, `Import complete. Added ${addedCount} new item(s).`);
+        await checkIfItemExistsInInbox();
+      } finally {
+        addToInboxButton.style.display = "block";
+      }
+    });
+  }
+
+  function renderWishlistImportProgress(items, completedCount, summaryText) {
+    const safeCompleted = Math.max(0, Math.min(completedCount, items.length));
+    const percent = items.length ? Math.round((safeCompleted / items.length) * 100) : 0;
+    const activeItem = items[Math.min(safeCompleted, items.length - 1)];
+    const imageUrl = activeItem?.imageUrl || "";
+    const itemName = activeItem?.title || "N/A";
+    const itemPrice = (activeItem?.price || "N/A").trim() || "N/A";
+
+    setStatus(`
+      <div style="margin-bottom:8px;"><strong>${summaryText}</strong></div>
+      <div style="width:100%;height:12px;border:1px solid #ccc;border-radius:8px;overflow:hidden;background:#f2f2f2;margin-bottom:8px;">
+        <div style="height:100%;width:${percent}%;background:#4caf50;transition:width .2s;"></div>
+      </div>
+      <div style="font-size:12px;margin-bottom:8px;">${safeCompleted}/${items.length} (${percent}%)</div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:8px;border:1px solid #ddd;border-radius:8px;background:#fafafa;">
+        <div style="min-width:64px;min-height:64px;width:64px;height:64px;background:#fff;border:1px solid #eee;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+          ${imageUrl ? `<img src="${imageUrl}" alt="Item image" style="max-width:100%;max-height:100%;" />` : '<span style="font-size:11px;color:#999;">No image</span>'}
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:13px;line-height:1.3;"><strong>${itemName}</strong></div>
+          <div style="font-size:12px;color:#333;margin-top:4px;">${itemPrice}</div>
+        </div>
+      </div>
+    `);
   }
   // Display parsed data with editable textboxes
   function displayParsedData(title, price, url) {
@@ -778,4 +942,57 @@ function scrapePageData() {
 
   // alert(JSON.stringify(results));
   return results;
+}
+
+function scrapeAmazonWishlistItems() {
+  const dedup = new Set();
+  const items = [];
+
+  // Amazon wishlist pages consistently expose item links with id="itemName_<LIST_ITEM_ID>".
+  const itemAnchors = Array.from(document.querySelectorAll("a[id^='itemName_'], #g-items a.a-link-normal[id*='itemName']"));
+
+  itemAnchors.forEach((anchor) => {
+    const title = (anchor.getAttribute("title") || anchor.textContent || "").trim();
+    if (!title) return;
+    const dedupKey = title.toLowerCase();
+    if (dedup.has(dedupKey)) return;
+
+    const container = anchor.closest("[id^='item_'], .g-item-sortable, li, .a-fixed-left-grid, .a-row") || document;
+    const listItem = anchor.closest("li[data-itemid], li[data-id], li[data-price]");
+    const anchorId = anchor.getAttribute("id") || "";
+    const itemIdSuffix = anchorId.startsWith("itemName_") ? anchorId.replace("itemName_", "") : "";
+    const itemImageById = itemIdSuffix ? document.querySelector(`#itemImage_${CSS.escape(itemIdSuffix)} img`) : null;
+    const listItemImage = listItem?.querySelector("div[id^='itemImage_'] img, a.a-link-normal img, img");
+    const dataPrice = listItem?.getAttribute("data-price")?.trim() || "";
+    const priceEl = container.querySelector("[id^='itemPrice_'] .a-offscreen, .price-section .a-offscreen, .a-price .a-offscreen, .a-color-price");
+    const imageEl = itemImageById || listItemImage || container.querySelector("[id^='itemImage_'] img, .a-link-normal img, img");
+    const href = anchor.getAttribute("href") || "";
+    const rawPrice = dataPrice || (priceEl?.textContent || "").trim();
+    const normalizedPrice = rawPrice && rawPrice.startsWith("$") ? rawPrice : (rawPrice ? `$${rawPrice}` : "");
+    const imageSrc = imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || imageEl?.getAttribute("data-old-hires") || "";
+
+    dedup.add(dedupKey);
+    items.push({
+      title,
+      price: normalizedPrice,
+      url: href.startsWith("http") ? href : new URL(href, window.location.origin).toString(),
+      imageUrl: imageSrc,
+    });
+  });
+
+  return items;
+}
+
+function scrapeAmazonProductAsWishlistItem() {
+  const title = (document.querySelector("#productTitle")?.textContent || document.title || "").trim();
+  const price = (document.querySelector(".a-price .a-offscreen, .a-price-whole")?.textContent || "").trim();
+  const canonicalUrl = document.querySelector("link[rel='canonical']")?.href || window.location.href;
+
+  if (!title) return [];
+  return [{
+    title,
+    price,
+    url: canonicalUrl,
+    imageUrl: document.querySelector("#landingImage, #imgBlkFront, #ebooksImgBlkFront")?.src || "",
+  }];
 }
