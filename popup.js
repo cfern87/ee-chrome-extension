@@ -533,7 +533,8 @@ function isLoggedOut() {
     renderWishlistImportBanner(financialModeEnabled, async (shouldImport) => {
       if (!shouldImport) {
         taskModeLockedForWishlist=true;
-        setStoredModeIsDesire(MODE_TASK);
+        setThoughtModeOn();
+        modeToggleSwitch.removeAttribute("checked");
         modeToggleSwitch.setAttribute("disabled","disabled");
         modeToggleSwitchRightOption.classList.add("disabled");
         setStatus("Wishlist import skipped. Task mode is now enabled for this wishlist.");
