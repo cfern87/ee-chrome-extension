@@ -913,13 +913,17 @@ function scrapeAmazonWishlistItems() {
 
     const container = anchor.closest("[id^='item_'], .g-item-sortable, li, .a-fixed-left-grid, .a-row") || document;
     const listItem = anchor.closest("li[data-itemid], li[data-id], li[data-price]");
+    const anchorId = anchor.getAttribute("id") || "";
+    const itemIdSuffix = anchorId.startsWith("itemName_") ? anchorId.replace("itemName_", "") : "";
+    const itemImageById = itemIdSuffix ? document.querySelector(`#itemImage_${CSS.escape(itemIdSuffix)} img`) : null;
+    const listItemImage = listItem?.querySelector("div[id^='itemImage_'] img, a.a-link-normal img, img");
     const dataPrice = listItem?.getAttribute("data-price")?.trim() || "";
     const priceEl = container.querySelector("[id^='itemPrice_'] .a-offscreen, .price-section .a-offscreen, .a-price .a-offscreen, .a-color-price");
-    const imageEl = container.querySelector("[id^='itemImage_'] img, .a-link-normal img, img");
+    const imageEl = itemImageById || listItemImage || container.querySelector("[id^='itemImage_'] img, .a-link-normal img, img");
     const href = anchor.getAttribute("href") || "";
     const rawPrice = dataPrice || (priceEl?.textContent || "").trim();
     const normalizedPrice = rawPrice && rawPrice.startsWith("$") ? rawPrice : (rawPrice ? `$${rawPrice}` : "");
-    const imageSrc = imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || "";
+    const imageSrc = imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || imageEl?.getAttribute("data-old-hires") || "";
 
     dedup.add(dedupKey);
     items.push({
