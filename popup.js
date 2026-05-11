@@ -852,24 +852,28 @@ function scrapePageData() {
 }
 
 function scrapeAmazonWishlistItems() {
-  const itemNodes = Array.from(document.querySelectorAll("[id^='item_'], .g-item-sortable, .wl-list-item-view, .a-fixed-left-grid"));
   const dedup = new Set();
   const items = [];
 
-  itemNodes.forEach((node) => {
-    const titleEl = node.querySelector("h2 a, h3 a, .a-link-normal[title], [id*='itemName'], .a-truncate-full, .a-size-base-plus");
-    const title = (titleEl?.textContent || titleEl?.getAttribute("title") || "").trim();
-    if (!title || dedup.has(title.toLowerCase())) return;
+  // Amazon wishlist pages consistently expose item links with id="itemName_<LIST_ITEM_ID>".
+  const itemAnchors = Array.from(document.querySelectorAll("a[id^='itemName_'], #g-items a.a-link-normal[id*='itemName']"));
 
-    const priceEl = node.querySelector(".a-price .a-offscreen, .a-color-price, .itemPrice");
-    const urlEl = node.querySelector("a.a-link-normal[href*='/dp/'], a[href*='/gp/product/']");
-    const imageEl = node.querySelector("img");
+  itemAnchors.forEach((anchor) => {
+    const title = (anchor.getAttribute("title") || anchor.textContent || "").trim();
+    if (!title) return;
+    const dedupKey = title.toLowerCase();
+    if (dedup.has(dedupKey)) return;
 
-    dedup.add(title.toLowerCase());
+    const container = anchor.closest("[id^='item_'], .g-item-sortable, .a-fixed-left-grid, li, .a-row") || document;
+    const priceEl = container.querySelector(".a-price .a-offscreen, .a-color-price, .itemPrice, [data-a-color='price']");
+    const imageEl = container.querySelector("img");
+    const href = anchor.getAttribute("href") || "";
+
+    dedup.add(dedupKey);
     items.push({
       title,
       price: (priceEl?.textContent || "").trim(),
-      url: urlEl?.href || "",
+      url: href.startsWith("http") ? href : new URL(href, window.location.origin).toString(),
       imageUrl: imageEl?.src || "",
     });
   });
