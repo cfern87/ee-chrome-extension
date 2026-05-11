@@ -17,6 +17,7 @@ let featureSet={
   "desireInbox":false,
   "mindsetMastery":false
 }
+let taskModeLockedForWishlist=false;
 
 //Get features from api
 //Replace features based on response from api and set featureSet.
@@ -85,6 +86,11 @@ function isLoggedOut() {
     // });
   });
   modeToggleSwitch.addEventListener("change",(e)=>{
+    if (taskModeLockedForWishlist && e.target.checked===true){
+      e.preventDefault();
+      setThoughtModeOn();
+      return;
+    }
     modeToggleSwitch.toggleAttribute("checked",e.target.checked);
     chrome.storage.local.remove("people");
     chrome.storage.local.remove("selectedPersonId");
@@ -514,17 +520,45 @@ function isLoggedOut() {
     const pageUrl = tab?.url || "";
     const isWishlistPage = isAmazonWishlistUrl(pageUrl);
     const isProductPage = isAmazonProductUrl(pageUrl);
-    if (!tab?.id || (!isWishlistPage && !isProductPage)) return;
+    if (!tab?.id || (!isWishlistPage && !isProductPage)) {
+      taskModeLockedForWishlist=false;
+      modeToggleSwitch.removeAttribute("disabled");
+      return;
+    }
 
     const financialModeEnabled = await ifFinancialSupportEnabled();
     const mode = financialModeEnabled ? MODE_DESIRE_STRING : MODE_TASK_STRING;
     if (isModeDesire() !== financialModeEnabled) setStoredModeIsDesire(financialModeEnabled);
 
-    const shouldImport = confirm(
-      `Amazon wishlist item(s) detected.\nWould you like to add them to your ${financialModeEnabled ? "financial" : "task"} inbox?`
-    );
-    if (!shouldImport) return;
-    await importAmazonWishlistItems(tab.id, mode, isWishlistPage);
+    renderWishlistImportBanner(financialModeEnabled, async (shouldImport) => {
+      if (!shouldImport) {
+        taskModeLockedForWishlist=true;
+        setStoredModeIsDesire(MODE_TASK);
+        modeToggleSwitch.setAttribute("disabled","disabled");
+        modeToggleSwitchRightOption.classList.add("disabled");
+        setStatus("Wishlist import skipped. Task mode is now enabled for this wishlist.");
+        return;
+      }
+      taskModeLockedForWishlist=false;
+      modeToggleSwitch.removeAttribute("disabled");
+      await importAmazonWishlistItems(tab.id, mode, isWishlistPage);
+    });
+  }
+
+  function renderWishlistImportBanner(financialModeEnabled, onDecision){
+    const inboxName=financialModeEnabled?"financial":"task";
+    setStatus(`
+      <div style="border:1px solid #d7e3ff;background:#f5f8ff;padding:10px;border-radius:8px;">
+        <div style="font-weight:bold;margin-bottom:6px;">Amazon wishlist detected</div>
+        <div style="font-size:12px;margin-bottom:10px;">Would you like to add these item(s) to your ${inboxName} inbox?</div>
+        <div style="display:flex;gap:8px;">
+          <button id="wishlistImportYes" style="flex:1;">Yes, import</button>
+          <button id="wishlistImportNo" style="flex:1;">No</button>
+        </div>
+      </div>
+    `);
+    document.getElementById("wishlistImportYes")?.addEventListener("click",()=>onDecision(true),{once:true});
+    document.getElementById("wishlistImportNo")?.addEventListener("click",()=>onDecision(false),{once:true});
   }
 
   async function importAmazonWishlistItems(tabId, mode, isWishlistPage) {
