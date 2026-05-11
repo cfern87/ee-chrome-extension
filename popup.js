@@ -537,6 +537,12 @@ function isLoggedOut() {
         modeToggleSwitch.setAttribute("disabled","disabled");
         modeToggleSwitchRightOption.classList.add("disabled");
         setStatus("Wishlist import skipped. Task mode is now enabled for this wishlist.");
+        displayModeSwitch(true);
+        actionButtonDisplay(true);
+        parsePageData().then(() => {
+          parsedDataViewValidationUpdate();
+          checkIfItemExistsInInbox();
+        });
         return;
       }
       taskModeLockedForWishlist=false;
