@@ -24,7 +24,7 @@ let taskModeLockedForWishlist=false;
 
 
 const PEOPLE_NONE = false;
-document.addEventListener("DOMContentLoaded", async () => {[]
+document.addEventListener("DOMContentLoaded", async () => {
 
   const accountButton = document.getElementById("validateEmail");
   accountButton.classList.add("infoElement");
