@@ -541,31 +541,73 @@ function isLoggedOut() {
         return;
       }
 
+      renderWishlistImportProgress(items, 0, "Starting import...");
       let addedCount = 0;
-      for (const item of items) {
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index];
+        renderWishlistImportProgress(items, index, "Checking item...");
+
         const existsBody = { title: item.title, mode, email, selectedPersonId, clientID };
         const existsResponse = await fetch(ITEM_EXISTS_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(existsBody),
         });
-        if (!existsResponse.ok) continue;
+        if (!existsResponse.ok) {
+          renderWishlistImportProgress(items, index, "Check failed. Skipping item.");
+          continue;
+        }
         const existsData = await existsResponse.json();
-        if (existsData.exists) continue;
+        if (existsData.exists) {
+          renderWishlistImportProgress(items, index + 1, "Item already exists. Skipped.");
+          continue;
+        }
 
         let addBody = { ...existsBody, url: item.url || item.imageUrl || item.title };
         if (mode === MODE_DESIRE_STRING && item.price) addBody = { ...addBody, price: item.price };
+        renderWishlistImportProgress(items, index, "Adding item...");
         const addResponse = await fetch(ADD_TO_INBOX_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(addBody),
         });
-        if (addResponse.ok) addedCount += 1;
+        if (addResponse.ok) {
+          addedCount += 1;
+          renderWishlistImportProgress(items, index + 1, "Item added.");
+        } else {
+          renderWishlistImportProgress(items, index, "Add failed. Skipping item.");
+        }
       }
 
-      setStatus(`Wishlist import complete. Added ${addedCount} new item(s).`);
+      renderWishlistImportProgress(items, items.length, `Import complete. Added ${addedCount} new item(s).`);
       await checkIfItemExistsInInbox();
     });
+  }
+
+  function renderWishlistImportProgress(items, completedCount, summaryText) {
+    const safeCompleted = Math.max(0, Math.min(completedCount, items.length));
+    const percent = items.length ? Math.round((safeCompleted / items.length) * 100) : 0;
+    const activeItem = items[Math.min(safeCompleted, items.length - 1)];
+    const imageUrl = activeItem?.imageUrl || "";
+    const itemName = activeItem?.title || "N/A";
+    const itemPrice = (activeItem?.price || "N/A").trim() || "N/A";
+
+    setStatus(`
+      <div style="margin-bottom:8px;"><strong>${summaryText}</strong></div>
+      <div style="width:100%;height:12px;border:1px solid #ccc;border-radius:8px;overflow:hidden;background:#f2f2f2;margin-bottom:8px;">
+        <div style="height:100%;width:${percent}%;background:#4caf50;transition:width .2s;"></div>
+      </div>
+      <div style="font-size:12px;margin-bottom:8px;">${safeCompleted}/${items.length} (${percent}%)</div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:8px;border:1px solid #ddd;border-radius:8px;background:#fafafa;">
+        <div style="min-width:64px;min-height:64px;width:64px;height:64px;background:#fff;border:1px solid #eee;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+          ${imageUrl ? `<img src="${imageUrl}" alt="Item image" style="max-width:100%;max-height:100%;" />` : '<span style="font-size:11px;color:#999;">No image</span>'}
+        </div>
+        <div style="flex:1;">
+          <div style="font-size:13px;line-height:1.3;"><strong>${itemName}</strong></div>
+          <div style="font-size:12px;color:#333;margin-top:4px;">${itemPrice}</div>
+        </div>
+      </div>
+    `);
   }
   // Display parsed data with editable textboxes
   function displayParsedData(title, price, url) {
