@@ -530,16 +530,18 @@ function isLoggedOut() {
   async function importAmazonWishlistItems(tabId, mode, isWishlistPage) {
     chrome.storage.local.get(["email", "selectedPersonId", "clientID"], async ({ email, selectedPersonId, clientID }) => {
       if (!email) return;
-      const [result] = await chrome.scripting.executeScript({
-        target: { tabId },
-        function: isWishlistPage ? scrapeAmazonWishlistItems : scrapeAmazonProductAsWishlistItem,
-      });
+      addToInboxButton.style.display = "none";
+      try {
+        const [result] = await chrome.scripting.executeScript({
+          target: { tabId },
+          function: isWishlistPage ? scrapeAmazonWishlistItems : scrapeAmazonProductAsWishlistItem,
+        });
 
-      const items = (result?.result || []).filter((item) => item.title);
-      if (!items.length) {
-        setStatus("No wishlist items were detected on this page.");
-        return;
-      }
+        const items = (result?.result || []).filter((item) => item.title);
+        if (!items.length) {
+          setStatus("No wishlist items were detected on this page.");
+          return;
+        }
 
       renderWishlistImportProgress(items, 0, "Starting import...");
       let addedCount = 0;
@@ -579,8 +581,11 @@ function isLoggedOut() {
         }
       }
 
-      renderWishlistImportProgress(items, items.length, `Import complete. Added ${addedCount} new item(s).`);
-      await checkIfItemExistsInInbox();
+        renderWishlistImportProgress(items, items.length, `Import complete. Added ${addedCount} new item(s).`);
+        await checkIfItemExistsInInbox();
+      } finally {
+        addToInboxButton.style.display = "block";
+      }
     });
   }
 
@@ -906,17 +911,22 @@ function scrapeAmazonWishlistItems() {
     const dedupKey = title.toLowerCase();
     if (dedup.has(dedupKey)) return;
 
-    const container = anchor.closest("[id^='item_'], .g-item-sortable, .a-fixed-left-grid, li, .a-row") || document;
-    const priceEl = container.querySelector(".a-price .a-offscreen, .a-color-price, .itemPrice, [data-a-color='price']");
-    const imageEl = container.querySelector("img");
+    const container = anchor.closest("[id^='item_'], .g-item-sortable, li, .a-fixed-left-grid, .a-row") || document;
+    const listItem = anchor.closest("li[data-itemid], li[data-id], li[data-price]");
+    const dataPrice = listItem?.getAttribute("data-price")?.trim() || "";
+    const priceEl = container.querySelector("[id^='itemPrice_'] .a-offscreen, .price-section .a-offscreen, .a-price .a-offscreen, .a-color-price");
+    const imageEl = container.querySelector("[id^='itemImage_'] img, .a-link-normal img, img");
     const href = anchor.getAttribute("href") || "";
+    const rawPrice = dataPrice || (priceEl?.textContent || "").trim();
+    const normalizedPrice = rawPrice && rawPrice.startsWith("$") ? rawPrice : (rawPrice ? `$${rawPrice}` : "");
+    const imageSrc = imageEl?.getAttribute("src") || imageEl?.getAttribute("data-src") || "";
 
     dedup.add(dedupKey);
     items.push({
       title,
-      price: (priceEl?.textContent || "").trim(),
+      price: normalizedPrice,
       url: href.startsWith("http") ? href : new URL(href, window.location.origin).toString(),
-      imageUrl: imageEl?.src || "",
+      imageUrl: imageSrc,
     });
   });
 
