@@ -256,6 +256,18 @@ function isLoggedOut() {
   function setStatus(newStatus){
     status.innerHTML=`<p>${newStatus}</p>`;
   }
+  async function getActiveTabData() {
+    return new Promise((resolve) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => resolve(tab || null));
+    });
+  }
+
+  function isAmazonWishlistUrl(url = "") {
+    return /amazon\.[^/]+\/(hz\/wishlist|wishlist)/i.test(url);
+  }
+  function isAmazonProductUrl(url = "") {
+    return /amazon\.[^/]+\/(dp|gp\/product)\//i.test(url);
+  }
   function appendStatus(addToStatus){
     status.innerHTML+=`<p>${addToStatus}</p>`;
   }
@@ -269,6 +281,7 @@ function isLoggedOut() {
         if (selectedPersonId || people === PEOPLE_NONE) {
           await parsePageData();
           parsedDataViewValidationUpdate();
+          await maybePromptToImportAmazonWishlist();
         }
 
         loadNewModeProperties();
@@ -494,6 +507,64 @@ function isLoggedOut() {
           }
         }
       );
+    });
+  }
+  async function maybePromptToImportAmazonWishlist() {
+    const tab = await getActiveTabData();
+    const pageUrl = tab?.url || "";
+    const isWishlistPage = isAmazonWishlistUrl(pageUrl);
+    const isProductPage = isAmazonProductUrl(pageUrl);
+    if (!tab?.id || (!isWishlistPage && !isProductPage)) return;
+
+    const financialModeEnabled = await ifFinancialSupportEnabled();
+    const mode = financialModeEnabled ? MODE_DESIRE_STRING : MODE_TASK_STRING;
+    if (isModeDesire() !== financialModeEnabled) setStoredModeIsDesire(financialModeEnabled);
+
+    const shouldImport = confirm(
+      `Amazon wishlist item(s) detected.\nWould you like to add them to your ${financialModeEnabled ? "financial" : "task"} inbox?`
+    );
+    if (!shouldImport) return;
+    await importAmazonWishlistItems(tab.id, mode, isWishlistPage);
+  }
+
+  async function importAmazonWishlistItems(tabId, mode, isWishlistPage) {
+    chrome.storage.local.get(["email", "selectedPersonId", "clientID"], async ({ email, selectedPersonId, clientID }) => {
+      if (!email) return;
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        function: isWishlistPage ? scrapeAmazonWishlistItems : scrapeAmazonProductAsWishlistItem,
+      });
+
+      const items = (result?.result || []).filter((item) => item.title);
+      if (!items.length) {
+        setStatus("No wishlist items were detected on this page.");
+        return;
+      }
+
+      let addedCount = 0;
+      for (const item of items) {
+        const existsBody = { title: item.title, mode, email, selectedPersonId, clientID };
+        const existsResponse = await fetch(ITEM_EXISTS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(existsBody),
+        });
+        if (!existsResponse.ok) continue;
+        const existsData = await existsResponse.json();
+        if (existsData.exists) continue;
+
+        let addBody = { ...existsBody, url: item.url || item.imageUrl || item.title };
+        if (mode === MODE_DESIRE_STRING && item.price) addBody = { ...addBody, price: item.price };
+        const addResponse = await fetch(ADD_TO_INBOX_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(addBody),
+        });
+        if (addResponse.ok) addedCount += 1;
+      }
+
+      setStatus(`Wishlist import complete. Added ${addedCount} new item(s).`);
+      await checkIfItemExistsInInbox();
     });
   }
   // Display parsed data with editable textboxes
@@ -778,4 +849,44 @@ function scrapePageData() {
 
   // alert(JSON.stringify(results));
   return results;
+}
+
+function scrapeAmazonWishlistItems() {
+  const itemNodes = Array.from(document.querySelectorAll("[id^='item_'], .g-item-sortable, .wl-list-item-view, .a-fixed-left-grid"));
+  const dedup = new Set();
+  const items = [];
+
+  itemNodes.forEach((node) => {
+    const titleEl = node.querySelector("h2 a, h3 a, .a-link-normal[title], [id*='itemName'], .a-truncate-full, .a-size-base-plus");
+    const title = (titleEl?.textContent || titleEl?.getAttribute("title") || "").trim();
+    if (!title || dedup.has(title.toLowerCase())) return;
+
+    const priceEl = node.querySelector(".a-price .a-offscreen, .a-color-price, .itemPrice");
+    const urlEl = node.querySelector("a.a-link-normal[href*='/dp/'], a[href*='/gp/product/']");
+    const imageEl = node.querySelector("img");
+
+    dedup.add(title.toLowerCase());
+    items.push({
+      title,
+      price: (priceEl?.textContent || "").trim(),
+      url: urlEl?.href || "",
+      imageUrl: imageEl?.src || "",
+    });
+  });
+
+  return items;
+}
+
+function scrapeAmazonProductAsWishlistItem() {
+  const title = (document.querySelector("#productTitle")?.textContent || document.title || "").trim();
+  const price = (document.querySelector(".a-price .a-offscreen, .a-price-whole")?.textContent || "").trim();
+  const canonicalUrl = document.querySelector("link[rel='canonical']")?.href || window.location.href;
+
+  if (!title) return [];
+  return [{
+    title,
+    price,
+    url: canonicalUrl,
+    imageUrl: document.querySelector("#landingImage, #imgBlkFront, #ebooksImgBlkFront")?.src || "",
+  }];
 }
